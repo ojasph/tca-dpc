@@ -1,14 +1,16 @@
-"""Paper figures from the final-setting runs (v11s/v12s combo_b, v14s, v15s).
-Needs analysis/rows_paper.tsv (scripts/parse_logs_paper.py on Triton) and analysis/stats_<sweep>/ (stats .npz + paths .pkl).
+"""Paper figures from the v1-v4 sweeps (scripts/paper_sweeps/; run them with DPCC_SAVE_PATHS=1).
+Needs analysis/rows_paper.tsv (python analysis/parse_logs_paper.py > analysis/rows_paper.tsv) and the per-step stats
+(*_tilt_stats.npz) and paths (*_paths.pkl) that eval.py writes under logs_sweep/<sweep>/<task>/.
 Usage (from dpcc/): python analysis/plot_paper.py   -> analysis/figs/paper_*.{pdf,png}"""
-import csv, glob, pickle, re, sys, collections, numpy as np, yaml, matplotlib
+import csv, glob, os, pickle, re, sys, collections, numpy as np, yaml, matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
 sys.path.insert(0, 'analysis'); from tilt_stats_lib import load, pad
 
-OUT = 'analysis/figs'
+OUT = 'analysis/figs'; os.makedirs(OUT, exist_ok=True)
+LOGS = 'logs_sweep'      # run_sweep.sbatch writes each task to logs_sweep/<sweep>/<task>
 plt.rcParams.update({  # paper style (L4DC / PMLR body font is Computer Modern)
     'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fontset': 'cm', 'axes.formatter.use_mathtext': True,
     'axes.unicode_minus': False, 'font.size': 8, 'axes.titlesize': 8, 'axes.labelsize': 8, 'legend.fontsize': 7,
@@ -24,11 +26,11 @@ C = {'Ours': '#2a78d6', 'DPCC-C': '#eb6834', 'DPCC-T': '#1baf7a', 'Prior + verif
 DISP = {'Ours': 'TCA-DPC'}   # display name in legends
 MK = {'Ours': 'o', 'DPCC-C': 's', 'DPCC-T': '^', 'Prior + verification': 'D', 'Equal sampler evaluations': 'v', 'Prior': 'x'}
 LAY = {'tl': 'Top-left', 'tr': 'Top-right', 'bh': 'Both'}
-OURS = {'tl': ('sweep_v17s', 'split_tl_buf2.5'), 'tr': ('sweep_v17s', 'split_tr_buf2.5'), 'bh': ('sweep_v17s', 'split_bh_buf2.5')}   # final method: split check (v17)
+OURS = {l: ('v1', f'split_{l}_buf2.5') for l in LAY}       # main results, gamma = 2.5 cm
+OURS0 = {l: ('v3', f'split_{l}_buf0') for l in LAY}         # gamma = 0 (buffer sweep)
 
 def save(fig, name):
-    for d in (OUT, 'Constraint_Aware_Diffusion_Predictive_Control/figs'):
-        for ext in ('pdf', 'png'): fig.savefig(f'{d}/{name}.{ext}', dpi=200)
+    for ext in ('pdf', 'png'): fig.savefig(f'{OUT}/{name}.{ext}', dpi=200)
     plt.close(fig); print('wrote', name)
 
 # ---------------- per-seed rows ----------------
@@ -39,71 +41,15 @@ def vals(sw, job, k='GC'): return np.array([float(r[k]) for r in R[(sw, job)] if
 def ms(sw, job, k='GC'):
     v = vals(sw, job, k); return (v.mean(), v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0., len(v)) if len(v) else (np.nan, 0., 0)
 def src(method, l, b='2.5'):
-    if method == 'Ours': return OURS[l] if b == '2.5' else ('sweep_v15s' if (l == 'tr' and b != '0') else 'sweep_v14s', f'tilt_{l}_buf{b}')
-    sw = 'sweep_v15s' if (l == 'tr' and b not in ('0', '2.5')) else 'sweep_v14s'
-    return sw, {'DPCC-C': f'dpccc_{l}_buf{b}', 'DPCC-T': f'dpcct_{l}_buf{b}', 'Prior': f'diffuser_{l}',
-                'Prior + verification': f'priorcheck_{l}', 'Equal sampler evaluations': f'eqcomp24_{l}'}[method]
+    """(sweep, job) of a method on layout l at buffer b [cm]: 2.5 cm from v1 (TCA-DPC) / v2 (baselines), 0-2 cm from v3."""
+    if method == 'Ours': return OURS[l] if b == '2.5' else ('v3', f'split_{l}_buf{b}')
+    return ('v2' if b == '2.5' else 'v3'), {'DPCC-C': f'dpccc_{l}_buf{b}', 'DPCC-T': f'dpcct_{l}_buf{b}', 'Prior': f'diffuser_{l}',
+                                            'Prior + verification': f'priorcheck_{l}', 'Equal sampler evaluations': f'eqcomp24_{l}'}[method]
+def stats(sw, job): return sum([load(p)[0] for p in sorted(glob.glob(f'{LOGS}/{sw}/{job}_s?'))], [])
 
-# ---------------- Fig: buffer sweep, top-left, v10 tilt setting ----------------
-# tilt: strict check (tol 1e-5), beta0 1e3, kappa 3e3, delta 0.05, beta_max 1e4, M5 B4 (identical config in v6 / v10 / v9)
-# DPCC-C / DPCC-T: v14s (same frozen models)
-# both-hard: tilt 0 cm = v8 M5_B4, 2.5 cm = v7 nd_cap3_extra10_tight; DPCC-C 0.5-2 cm = v10 dpcc_bh (dpcc-c-tightened);
-# DPCC-T has no both-hard runs at 0.5-2 cm (markers only at 0 / 2.5)
 BUFS = ['0', '0.5', '1', '1.5', '2', '2.5']
-MID = ['0.5', '1', '1.5', '2']
-OURS_BUF = {'tl': {'0': ('sweep_v6', 'tl_nd_extra10'), '2.5': ('sweep_v9', 'nd_cap3_extra10_tight_tl'),
-                   **{b: ('sweep_v10', f'tilt_tl_buf{b}cm') for b in MID}},
-            'bh': {'0': ('sweep_v8', 'M5_B4'), '2.5': ('sweep_v7', 'nd_cap3_extra10_tight'),
-                   **{b: ('sweep_v10', f'tilt_bh_buf{b}cm') for b in MID}}}
-def buf_src(m, l, b):
-    if m == 'Ours': return OURS_BUF[l][b]
-    if m == 'DPCC-C' and l == 'bh' and b in MID: return 'sweep_v10', f'dpcc_bh_buf{b}cm'
-    return src(m, l, b)
-fig, axes = plt.subplots(1, 2, figsize=(5.6, 2.2), sharey=True)
-for ax, l in zip(axes, ['tl', 'bh']):
-    for m, dx in [('Ours', -0.03), ('DPCC-C', 0.), ('DPCC-T', 0.03)]:
-        y = np.array([ms(*buf_src(m, l, b)) for b in BUFS])
-        x = np.array([float(b) for b in BUFS]) + dx; ok = ~np.isnan(y[:, 0])
-        ax.errorbar(x[ok], y[ok, 0], yerr=y[ok, 1], color=C[m], marker=MK[m], ms=3.5, lw=1.0 if ok.all() else 0,
-                    capsize=1.5, elinewidth=0.6, mec='white', mew=0.5, label=DISP.get(m, m))
-        print('buffer', l, m, np.round(y[:, 0], 2), 'n', y[:, 2])
-    ax.set_title(LAY[l]); ax.set_xlabel(r'Tightening $\gamma$ [cm]'); ax.set_xticks([float(b) for b in BUFS])
-axes[0].set_ylim(0.35, 1.03); axes[0].set_ylabel('Success (goal + constraints)')
-axes[1].legend(loc='lower right')
-save(fig, 'paper_buffer')
-
-# ---------------- Fig: both-hard, tilt vs DPCC-C, 0-2 cm ----------------
-B02 = BUFS[:-1]
-fig, ax = plt.subplots(figsize=(3.0, 2.2))
-for m, dx in [('Ours', -0.02), ('DPCC-C', 0.02)]:
-    y = np.array([ms(*buf_src(m, 'bh', b)) for b in B02])
-    ax.errorbar(np.array([float(b) for b in B02]) + dx, y[:, 0], yerr=y[:, 1], color=C[m], marker=MK[m], ms=3.5, lw=1.0,
-                capsize=1.5, elinewidth=0.6, mec='white', mew=0.5, label={'Ours': 'TCA-DPC', 'DPCC-C': 'DPCC'}[m])
-    print('buffer_bh', m, np.round(y[:, 0], 2), 'n', y[:, 2])
-ax.set_title(LAY['bh']); ax.set_xlabel(r'Tightening $\gamma$ [cm]'); ax.set_xticks([float(b) for b in B02])
-ax.set_ylim(0.3, 1.03); ax.set_ylabel('Success (goal + constraints)'); ax.legend(loc='lower right')
-save(fig, 'paper_buffer_bh')
-
-# ---------------- Fig: top-right, combo_b buffer sweep (v14s 0 cm, v15s 0.5-2 cm, v12s 2.5 cm) ----------------
-fig, ax = plt.subplots(figsize=(3.0, 2.2))
-for m, dx in [('Ours', -0.03), ('DPCC-C', 0.), ('DPCC-T', 0.03)]:
-    y = np.array([ms(*src(m, 'tr', b)) for b in BUFS])
-    ax.errorbar(np.array([float(b) for b in BUFS]) + dx, y[:, 0], yerr=y[:, 1], color=C[m], marker=MK[m], ms=3.5, lw=1.0,
-                capsize=1.5, elinewidth=0.6, mec='white', mew=0.5, label=DISP.get(m, m))
-    print('buffer_tr', m, np.round(y[:, 0], 2), 'n', y[:, 2])
-ax.set_title(LAY['tr']); ax.set_xlabel(r'Tightening $\gamma$ [cm]'); ax.set_xticks([float(b) for b in BUFS])
-ax.set_ylim(0.55, 1.03); ax.set_ylabel('Success (goal + constraints)'); ax.legend(loc='lower right')
-save(fig, 'paper_buffer_tr')
-
-# ---------------- Fig: split check (v16s) vs DPCC-C / DPCC-T, 3 layouts, 0-2 cm ----------------
-# split = combo_b with feas_tol 1e-5 on safety constraints, bounds_tol 3e-3 on velocity bounds (projection-free)
-# rows: analysis/rows_v16.tsv (per-seed). DPCC: v14s/v15s, both-hard 0.5-2 cm DPCC-C from v10; DPCC-T both-hard from v16s once run
-for r in csv.DictReader(open('analysis/rows_v16.tsv'), delimiter='\t'):
-    R[(r['sweep'], re.sub(r'_s\d$', '', r['job']))].append(r)
-def split_src(m, l, b):
-    if m == 'Ours': return 'sweep_v16s', f'split_{l}_buf{b}'
-    if l == 'bh' and b in MID: return ('sweep_v10', f'dpcc_bh_buf{b}cm') if m == 'DPCC-C' else ('sweep_v16s', f'dpcct_bh_buf{b}')
-    return src(m, l, b)
+# ---------------- Fig: TCA-DPC vs DPCC-C / DPCC-T, 3 layouts, gamma = 0-2 cm (v3) ----------------
+split_src = src
 B02 = BUFS[:-1]
 fig, axes = plt.subplots(1, 3, figsize=(6.6, 2.2), sharey=True)
 for ax, l in zip(axes, ['tl', 'tr', 'bh']):
@@ -132,8 +78,7 @@ ax.legend(ncol=5, loc='upper center', bbox_to_anchor=(0.5, 1.2), handlelength=1)
 save(fig, 'paper_baselines')
 
 # ---------------- Fig: number of MALA steps M (both, 2.5 cm) ----------------
-Ms = [(0, ('sweep_v14s', 'priorcheck_bh')), (1, ('sweep_v14s', 'M1_bh')), (2, ('sweep_v14s', 'M2_bh')),
-      (5, OURS['bh']), (10, ('sweep_v14s', 'M10_bh'))]
+Ms = [(0, ('v2', 'priorcheck_bh')), (1, ('v4', 'M1_bh')), (2, ('v4', 'M2_bh')), (5, OURS['bh']), (10, ('v4', 'M10_bh'))]
 fig, axes = plt.subplots(1, 3, figsize=(6.0, 1.9))
 for ax, (k, lab) in zip(axes, [('GC', 'Success (goal + constr.)'), ('f', r'Mean failure fraction $\bar f$'), ('time', 'Time per update [s]')]):
     y = np.array([ms(*s, k=k) for _, s in Ms])
@@ -151,12 +96,11 @@ save(fig, 'paper_M')
 # f_t: mean +- s.e. (f_t takes values k/B, so quantiles are uninformative). Points with < 25 episodes are dropped.
 PRE, POST, NMIN = 10, 50, 25
 # style 'traces': beta median + 10 episodes (paper_beta); 'iqr': beta median + interquartile range (paper_beta_iqr)
-OURS0 = {l: ('sweep_v16s', f'split_{l}_buf0') for l in ['tl', 'tr', 'bh']}     # final method without tightening (v16)
 for style, SRC, out in [('traces', OURS0, 'paper_beta'), ('iqr', OURS0, 'paper_beta_iqr'), ('traces', OURS, 'paper_beta_g25'), ('iqr', OURS, 'paper_beta_g25_iqr')]:   # paper: gamma = 0
     fig, axes = plt.subplots(2, 3, figsize=(6.0, 2.7), sharex=True, sharey='row')
     rng = np.random.default_rng(0)
     for j, l in enumerate(['tl', 'tr', 'bh']):
-        sw, job = SRC[l]; T = sum([load(p)[0] for p in sorted(glob.glob(f'analysis/stats_{sw}/{job}_s?'))], [])
+        T = stats(*SRC[l])
         on = [int(np.argmax(t['fail_frac'] > 0)) for t in T]
         show = rng.choice(len(T), 10, replace=False)
         for i, key in enumerate(['beta', 'fail_frac']):
@@ -210,12 +154,11 @@ def draw_scene(ax, l, ENL=ENL):
     for s in ax.spines.values(): s.set_visible(False)
 def paths(sw, job):
     P = []
-    for f in sorted(glob.glob(f'analysis/stats_{sw}/{job}*/**/*_paths.pkl', recursive=True)):
+    for f in sorted(glob.glob(f'{LOGS}/{sw}/{job}*/**/*_paths.pkl', recursive=True)):
         if re.search(rf'/{re.escape(job)}(_s\d)?/', f): P += pickle.load(open(f, 'rb'))
     return P
 rows = [('Prior', 'Prior'), ('Ours', 'TCA-DPC')]
-OURS0P = {l: ('sweep_v19s', f'split_{l}_buf0') for l in ['tl', 'tr', 'bh']}   # gamma = 0 rerun of v16 with paths saved
-for SRCP, out, enl in [(OURS0P, 'paper_paths', 0.0), (OURS, 'paper_paths_g25', ENL)]:   # paper: gamma = 0
+for SRCP, out, enl in [(OURS0, 'paper_paths', 0.0), (OURS, 'paper_paths_g25', ENL)]:   # paper: gamma = 0
     fig, axes = plt.subplots(len(rows), 3, figsize=(6.0, 2.45 * len(rows) + 0.35))
     for i, (m, lab) in enumerate(rows):
         for j, l in enumerate(['tl', 'tr', 'bh']):
@@ -240,11 +183,10 @@ def scen_fig(LAYS, out, figsize, top, bottom):
     for i, l in enumerate(LAYS):
         # paths: prior (grey) and ours (blue)
         ax = axes[i, 0]; draw_scene(ax, l, 0.0)
-        for s, c, a in [(src('Prior', l), C['Prior'], 0.35), (OURS0P[l], C['Ours'], 0.45)]:
+        for s, c, a in [(src('Prior', l), C['Prior'], 0.35), (OURS0[l], C['Ours'], 0.45)]:
             for p in paths(*s): ax.plot(p['xy'][:, 0], p['xy'][:, 1], color=c, lw=0.6, alpha=a, zorder=3)
         # beta_t, median + IQR, aligned to first failure
-        ax = axes[i, 1]; sw, job = OURS0[l]
-        T = sum([load(p)[0] for p in sorted(glob.glob(f'analysis/stats_{sw}/{job}_s?'))], [])
+        ax = axes[i, 1]; T = stats(*OURS0[l])
         A = np.full((len(T), PRE + POST + 1), np.nan)
         for e, t in enumerate(T):
             t0 = int(np.argmax(t['fail_frac'] > 0)); x = t['beta'][max(t0 - PRE, 0):t0 + POST + 1]

@@ -1,44 +1,43 @@
-"""Numbers for the paper's Simulations section (v11s/v12s/v14s/v15s). Usage: python analysis/paper_numbers.py"""
-import csv, glob, re, collections, numpy as np, sys
-sys.path.insert(0, 'analysis'); from tilt_stats_lib import load
+"""Numbers for the paper's tables from the v1-v4 sweeps (scripts/paper_sweeps/), averaged over the 5 model seeds.
+Needs analysis/rows_paper.tsv (python analysis/parse_logs_paper.py > analysis/rows_paper.tsv).
+GC = success rate (goal reached and constraints satisfied), time = s per control step, f = failing fraction, fb = fallback rate.
+Usage (from dpcc/): python analysis/paper_numbers.py"""
+import csv, re, collections, numpy as np
+
 R = collections.defaultdict(list)
 for r in csv.DictReader(open('analysis/rows_paper.tsv'), delimiter='\t'):
     R[(r['sweep'], re.sub(r'_s\d$', '', r['job']))].append(r)
+LAY = ['tl', 'tr', 'bh']
+
+
 def agg(sw, job):
     rows = R[(sw, job)]; out = {'n': len(rows)}
-    for k in ['G', 'GC', 'steps', 'viol', 'time', 'f', 'fb']:
+    for k in ['G', 'GC', 'viol', 'time', 'f', 'fb']:
         v = [float(r[k]) for r in rows if r.get(k)]; out[k] = np.mean(v) if v else np.nan
-    tv = [list(map(float, r['tilt_viol'].split(','))) for r in rows if r.get('tilt_viol')]
-    if tv: a = np.array(tv); out['viol_tilt'] = (a[:, 0] * a[:, 1]).sum(); out['viol_fb'] = (a[:, 2] * a[:, 3]).sum(); out['n_fb'] = a[:, 2].sum(); out['n_tilt'] = a[:, 0].sum()
     return out
-ours = {'tl': ('sweep_v17s', 'split_tl_buf2.5'), 'tr': ('sweep_v17s', 'split_tr_buf2.5'), 'bh': ('sweep_v17s', 'split_bh_buf2.5')}   # final method: split check (v17)
-rows = {'Prior': {l: ('sweep_v14s', f'diffuser_{l}') for l in ours}, 'Prior + verification': {l: ('sweep_v14s', f'priorcheck_{l}') for l in ours},
-        'Equal compute B24': {l: ('sweep_v14s', f'eqcomp24_{l}') for l in ours}, 'Fixed beta': {'bh': ('sweep_v14s', 'fixedbeta1e3_bh')},
-        'Ours': ours, 'DPCC-C': {l: ('sweep_v14s', f'dpccc_{l}_buf2.5') for l in ours}, 'DPCC-T': {l: ('sweep_v14s', f'dpcct_{l}_buf2.5') for l in ours}}
-print('== Table main (2.5 cm): G GC per tl tr bh | mean viol steps time fb (n per layout)')
-for name, d in rows.items():
-    A = {l: agg(*d[l]) for l in d}
-    s = ' '.join(f"{l}:{A[l]['G']:.2f}/{A[l]['GC']:.2f}(n{A[l]['n']})" for l in ['tl', 'tr', 'bh'] if l in A)
-    m = lambda k: np.nanmean([A[l][k] for l in A])
-    print(f"{name:22s} {s} | viol {m('viol'):.2f} steps {m('steps'):.1f} time {m('time'):.2f} fb {m('fb'):.2f} f {m('f'):.2f}")
-print('== Ablation (both, 2.5 cm): GC f fb time n')
-abl = [('ours', 'sweep_v11s', 'combo_b'), ('M0', 'sweep_v14s', 'priorcheck_bh')] + [(f'M{m}', 'sweep_v14s', f'M{m}_bh') for m in [1, 2, 10]] + \
-      [('kappa0', 'sweep_v14s', 'fixedbeta1e3_bh')] + [(j.split('_')[0], 'sweep_v14s', j) for j in ['kappa100_bh', 'kappa2000_bh', 'delta0.05_bh', 'delta0.5_bh', 'betamax1e5_bh', 'tol1e-2_bh', 'eqcomp24_bh']]
-for n, sw, j in abl:
-    A = agg(sw, j); print(f"{n:12s} {A['GC']:.2f} {A['f']:.2f} {A['fb']:.2f} {A['time']:.2f} n{A['n']}")
-print('== Buffer sweep GC: tilt / DPCC-C / DPCC-T')
-for l in ['tl', 'tr']:
+
+
+def line(name, cells):
+    A = [agg(*c) for c in cells]
+    gc = ' '.join(f"{a['GC']:.2f}(n{a['n']})" for a in A)
+    print(f"{name:24s} {gc} | time {np.nanmean([a['time'] for a in A]):.2f} fb {np.nanmean([a['fb'] for a in A]):.2f}")
+
+
+print('== Main results and baselines, gamma = 2.5 cm: GC top-left top-right both')
+line('TCA-DPC (v1)', [('v1', f'split_{l}_buf2.5') for l in LAY])
+for name, job in [('Prior + verification', 'priorcheck_{}'), ('Equal evaluations B24', 'eqcomp24_{}'),
+                  ('DPCC-C', 'dpccc_{}_buf2.5'), ('DPCC-T', 'dpcct_{}_buf2.5'), ('Diffuser', 'diffuser_{}')]:
+    line(name, [('v2', job.format(l)) for l in LAY])
+
+print('== Buffer sweep (v3; 2.5 cm from v1/v2): GC TCA-DPC / DPCC-C / DPCC-T')
+for l in LAY:
     for b in ['0', '0.5', '1', '1.5', '2', '2.5']:
-        t = agg(*(ours[l] if b == '2.5' else ('sweep_v14s' if (l == 'tl' or b == '0') else 'sweep_v15s', f'tilt_{l}_buf{b}')))
-        sw = 'sweep_v14s' if (l == 'tl' or b in ('0', '2.5')) else 'sweep_v15s'
-        c, tt = agg(sw, f'dpccc_{l}_buf{b}'), agg(sw, f'dpcct_{l}_buf{b}')
-        print(f"{l} {b:4s} {t['GC']:.2f}(n{t['n']}) {c['GC']:.2f}(n{c['n']}) {tt['GC']:.2f}(n{tt['n']})  time {t['time']:.2f}/{c['time']:.2f}")
-print('== Q4 / Q3 from ours')
-tot = collections.Counter()
-for l, (sw, j) in ours.items():
-    A = agg(sw, j); print(l, {k: A.get(k) for k in ['viol_tilt', 'viol_fb', 'n_fb', 'n_tilt', 'fb']})
-    T, hp = load(f'analysis/stats_{sw}/{j}_s*') if False else (sum([load(p)[0] for p in sorted(glob.glob(f'analysis/stats_{sw}/{j}_s?'))], []), None)
-    beta = np.concatenate([t['beta'] for t in T]); bn = np.concatenate([t['beta_next'] for t in T]); fb = np.concatenate([t['fallback'] for t in T]).astype(bool)
-    vmin = np.concatenate([t['vmax_min'] for t in T])
-    print(f"   trials {len(T)} beta<1e4 {np.mean(beta < 1e4 - 1):.3f} beta decreases {np.mean(bn < beta):.3f} median beta {np.median(beta):.0f} "
-          f"fb {fb.mean():.3f} median vmax_min on fb {np.median(vmin[fb]):.4f} mean {np.mean(vmin[fb]):.4f}")
+        sw, sb = ('v1', 'v2') if b == '2.5' else ('v3', 'v3')
+        t, c, tt = agg(sw, f'split_{l}_buf{b}'), agg(sb, f'dpccc_{l}_buf{b}'), agg(sb, f'dpcct_{l}_buf{b}')
+        print(f"{l} {b:4s} {t['GC']:.2f} / {c['GC']:.2f} / {tt['GC']:.2f}")
+
+print('== Ablations, both-hard, gamma = 2.5 cm (v4): GC f fb time')
+for n, (sw, j) in {'reference': ('v1', 'split_bh_buf2.5'),
+                   **{a: ('v4', f'{a}_bh') for a in ['M1', 'M2', 'M10', 'fixedbeta1e3', 'kappa100', 'kappa2000',
+                                                    'delta0.05', 'delta0.5', 'betamax1e5', 'tol1e-2']}}.items():
+    A = agg(sw, j); print(f"{n:14s} {A['GC']:.2f} {A['f']:.2f} {A['fb']:.2f} {A['time']:.2f} n{A['n']}")

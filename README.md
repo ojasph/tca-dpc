@@ -33,9 +33,14 @@ bash scripts/tca_dpc/run_eval.sh config/tca_dpc/tca_dpc.yaml
 To retrain the models: `bash scripts/tca_dpc/train_models.sh`, then pass `logs/avoiding-d3il/diffusion/H8_K20_Dmodels.GaussianDiffusion` as the second argument of `run_eval.sh`.
 
 ## Reproducing the paper
-`scripts/paper_sweeps/make_sweep_v*.py` write the configs of all experiments (v17: main results; v14–v16, v18: baselines,
-buffer sweeps, ablations); run them as a SLURM array with `scripts/run_sweep.sbatch`, then `analysis/parse_logs_paper.py`
-and `analysis/paper_numbers.py`.
+`scripts/paper_sweeps/make_sweep_v*.py` write the configs of all experiments:
+- v1: main results
+- v2: baselines
+- v3: buffer sweeps
+- v4: ablations
+
+Run them with `scripts/run_sweep.sbatch` and analyse the results with `analysis/parse_logs_paper.py` and `analysis/paper_numbers.py`.
+The figures are made by `analysis/plot_paper.py`.
 
 ## Acknowledgements
 Built on [DPCC](https://github.com/ralfroemer99/dpcc) and [Diffuser](https://github.com/jannerm/diffuser); the Avoiding

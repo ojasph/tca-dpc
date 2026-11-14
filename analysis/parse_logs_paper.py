@@ -1,4 +1,5 @@
-"""Parse Triton eval logs (logs_triton/*.out) into one row per (sweep, job, model seed). Run on Triton: python parse_logs_paper.py > rows.tsv"""
+"""Parse the sweep logs (logs_triton/*.out, written by scripts/run_sweep.sbatch) into one row per (sweep, job, model seed).
+Usage (from dpcc/): python analysis/parse_logs_paper.py > analysis/rows_paper.tsv"""
 import glob, re, os
 pat = {k: re.compile(v) for k, v in dict(
     G=r'^Success rate: ([\d.]+)', GC=r'^Success rate \(goal and constraints\): ([\d.]+)', steps=r'^Avg number of steps: ([\d.]+)',

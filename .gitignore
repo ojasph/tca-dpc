@@ -4,3 +4,4 @@ logs*/
 analysis/stats_*/
 analysis/*.tsv
 analysis/figs/
+configs/sweeps/
