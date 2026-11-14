@@ -1,0 +1,481 @@
+--- a/config/avoiding-d3il.py
++++ b/config/avoiding-d3il.py
+@@ -1,3 +1,5 @@
++import os
++import torch
+ from diffuser.utils import watch
+ 
+ #------------------------ base ------------------------#
+@@ -12,7 +14,7 @@
+     ('diffusion', 'D'),
+ ]
+ 
+-logbase = 'logs'
++logbase = os.environ.get('DPCC_LOGBASE', 'logs')
+ 
+ base = {
+     'diffusion': {
+@@ -52,14 +54,14 @@
+         'exp_name': watch(args_to_watch),
+ 
+         ## training
+-        'n_steps_per_epoch': 1000,
+-        'n_train_steps': 1e5,
+-        'batch_size': 8,
++        'n_steps_per_epoch': int(os.environ.get('DPCC_STEPS_PER_EPOCH', 1000)),
++        'n_train_steps': float(os.environ.get('DPCC_TRAIN_STEPS', 1e5)),
++        'batch_size': int(os.environ.get('DPCC_BATCH_SIZE', 8)),
+         'learning_rate': 1e-4,
+         'gradient_accumulate_every': 2,
+         'ema_decay': 0.995,
+         'train_test_split': 0.9,
+-        'device': 'cuda',
++        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+         'seed': 0,            # Overwritten
+     },
+ 
+@@ -68,7 +70,7 @@
+         'max_episode_length': 200,
+         'batch_size': 4,
+         'preprocess_fns': [],
+-        'device': 'cuda',
++        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+         'seed': 0,
+         'test_ret': 0,
+ 
+@@ -90,7 +92,7 @@
+         'diffusion_loadpath': 'f:diffusion/H{horizon}_K{n_diffusion_steps}_D{diffusion}',
+         'value_loadpath': 'f:values/H{horizon}_K{n_diffusion_steps}',
+ 
+-        'diffusion_epoch': 'best',      # 'latest'
++        'diffusion_epoch': os.environ.get('DPCC_EPOCH', 'best'),      # 'best' or 'latest'
+ 
+         'verbose': False,
+         'suffix': '0',
+--- a/config/projection_eval.yaml
++++ b/config/projection_eval.yaml
+@@ -48,6 +48,21 @@
+   'dpcc-c-tightened-dt2p0',
+   'dpcc-c-tightened-dt4p0',
+ ]
++# Noise-space tilt sampler (variants 'tilt', 'tilt-tightened', ...; see diffuser/sampling/tilt.py)
++tilt: {
++  n_langevin: 5,
++  step_size: 0.05,
++  mala: True,
++  tau: 0.05,
++  beta_init: 5.0,
++  beta_max: 50.0,
++  kappa: 2.0,
++  delta: 0.25,
++  warm_start: True,
++  n_fresh: 1,
++  selection: 'consistency',
++  fallback: 'project',
++}
+ projection_cost: 'pos_vel'
+ constraint_types: [
+   'halfspace', 
+--- a/diffuser/models/diffusion.py
++++ b/diffuser/models/diffusion.py
+@@ -1,3 +1,4 @@
++import os
+ import time
+ import numpy as np
+ import torch
+@@ -5,6 +6,9 @@
+ import torch.nn.functional as F
+ 
+ import diffuser.utils as utils
++
++# Scale of the Gaussian noise used when sampling (the released code hardcodes 0.5)
++NOISE_SCALE = float(os.environ.get('DPCC_NOISE_SCALE', 0.5))
+ from .helpers import (
+     cosine_beta_schedule,
+     extract,
+@@ -155,7 +159,7 @@
+     def p_sample(self, x, cond, t, returns=None, projector=None, constraints=None):
+         b, *_, device = *x.shape, x.device
+         model_mean, _, model_log_variance = self.p_mean_variance(x=x, cond=cond, t=t, returns=returns, projector=projector, constraints=constraints)
+-        noise = 0.5*torch.randn_like(x)
++        noise = NOISE_SCALE*torch.randn_like(x)
+         # no noise when t == 0
+         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+@@ -165,7 +169,7 @@
+         device = self.betas.device
+ 
+         batch_size = shape[0]
+-        x = 0.5*torch.randn(shape, device=device)
++        x = NOISE_SCALE*torch.randn(shape, device=device)
+         x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
+ 
+         if return_diffusion: diffusion = [x]
+@@ -201,6 +205,26 @@
+ 
+         return x, infos
+ 
++    def sample_from_noise(self, z, cond, returns=None):
++        '''
++            Differentiable, deterministic version of p_sample_loop (no projector):
++            the output is a fixed function Psi_c(z) of the noise z, where
++                z : [ batch x (n_timesteps + 1) x horizon x transition_dim ] ~ N(0, I)
++            z[:, 0] is the initial iterate x_K and z[:, K - i] is the noise injected after reverse step i
++            (z[:, K] is unused, since no noise is added at t = 0). Same noise scaling as p_sample_loop.
++        '''
++        K = self.n_timesteps
++        b = z.shape[0]
++        x = NOISE_SCALE * z[:, 0]
++        x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
++        for i in reversed(range(K)):
++            t = torch.full((b,), i, device=z.device, dtype=torch.long)
++            mean, _, log_var = self.p_mean_variance(x=x, cond=cond, t=t, returns=returns)
++            nonzero = 0. if i == 0 else 1.
++            x = mean + nonzero * (0.5 * log_var).exp() * NOISE_SCALE * z[:, K - i]
++            x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
++        return x
++
+     @torch.no_grad()
+     def conditional_sample(self, cond, returns=None, horizon=None, *args, **kwargs):
+         '''
+@@ -216,7 +240,7 @@
+     def grad_p_sample(self, x, cond, t, returns=None):
+         b, *_, device = *x.shape, x.device
+         model_mean, _, model_log_variance = self.p_mean_variance(x=x, cond=cond, t=t, returns=returns)
+-        noise = 0.5*torch.randn_like(x)
++        noise = NOISE_SCALE*torch.randn_like(x)
+         # no noise when t == 0
+         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+@@ -225,7 +249,7 @@
+         device = self.betas.device
+ 
+         batch_size = shape[0]
+-        x = 0.5*torch.randn(shape, device=device)
++        x = NOISE_SCALE*torch.randn(shape, device=device)
+         x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
+ 
+         if return_diffusion: diffusion = [x]
+--- a/diffuser/sampling/__init__.py
++++ b/diffuser/sampling/__init__.py
+@@ -1,2 +1,3 @@
+ from .projection import Projector
+-from .policies import Policy
+\ No newline at end of file
++from .policies import Policy
++from .tilt import TiltSampler
+--- a/diffuser/sampling/policies.py
++++ b/diffuser/sampling/policies.py
+@@ -14,7 +14,7 @@
+ class Policy:
+ 
+     def __init__(self, model, normalizer, scheduler=None, preprocess_fns=[], test_ret=0, projector=None, 
+-                 trajectory_selection='random', **sample_kwargs):
++                 trajectory_selection='random', tilt=None, **sample_kwargs):
+         self.model = model
+         self.scheduler = scheduler,   # 'DDPM' or 'DDIM'
+         self.normalizer = normalizer
+@@ -34,6 +34,9 @@
+         # Projector
+         self.projector = projector
+ 
++        # Noise-space tilt sampler (optional, replaces the standard sampling call)
++        self.tilt = tilt
++
+         # Trajectory selection
+         self.trajectory_selection = trajectory_selection        # 'random' or 'temporal_consistency' or 'minimum_projection_cost'
+ 
+@@ -45,11 +48,21 @@
+         conditions = self._format_conditions(conditions, batch_size)
+ 
+         test_ret = test_ret if test_ret is not None else self.test_ret
+-        returns = to_device(test_ret * torch.ones(batch_size, 1), 'cuda')
++        returns = to_device(test_ret * torch.ones(batch_size, 1), self.device)
+ 
+         # Use GaussianDiffusion model with DDPM
+         projector = self.projector if not disable_projection else None
+-        samples, infos = self.model(conditions, returns=returns, projector=projector, constraints=constraints, horizon=horizon, **self.sample_kwargs)
++        if self.tilt is not None and not disable_projection:
++            samples, tilt_info = self.tilt.sample(conditions, returns=returns, batch_size=batch_size)
++            c = tilt_info['chosen']
++            order = [c] + [j for j in range(samples.shape[0]) if j != c]         # chosen plan first (eval reads samples[0])
++            samples = samples[order]
++            tilt_info['chosen'] = 0
++            infos = {'projection_costs': {}}
++            self.last_tilt_info = tilt_info
++        else:
++            tilt_info = None
++            samples, infos = self.model(conditions, returns=returns, projector=projector, constraints=constraints, horizon=horizon, **self.sample_kwargs)
+ 
+         trajectories = utils.to_np(samples)
+ 
+@@ -62,7 +75,9 @@
+             observations = self.normalizer.unnormalize(diffusion_trajectories[:, :, :, self.action_dim:], 'observations')
+         
+         # Sort according to similarity with previous observations
+-        if self.trajectory_selection == 'temporal_consistency' and not disable_projection and self.prev_observations is not None:   # Temporal consistency
++        if tilt_info is not None:                                                                                                   # Tilt sampler: already verified and selected
++            which_trajectory = tilt_info['chosen']
++        elif self.trajectory_selection == 'temporal_consistency' and not disable_projection and self.prev_observations is not None:   # Temporal consistency
+             order = np.argsort(np.linalg.norm(observations[:,:-1,:] - self.prev_observations[:,1:,:], axis=(1,2)))
+             which_trajectory = order[0]
+             observations = observations[order]
+@@ -95,6 +110,12 @@
+ 
+         return action, trajectories
+ 
++    def reset(self):
++        """Call at the start of an episode to clear state carried across control steps."""
++        self.prev_observations = None
++        if self.tilt is not None:
++            self.tilt.reset()
++
+     @property
+     def device(self):
+         parameters = list(self.model.parameters())
+--- a/diffuser/utils/arrays.py
++++ b/diffuser/utils/arrays.py
+@@ -4,7 +4,7 @@
+ import pdb
+ 
+ DTYPE = torch.float
+-DEVICE = 'cuda:0'
++DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+ 
+ #-----------------------------------------------------------------------------#
+ #------------------------------ numpy <--> torch -----------------------------#
+@@ -74,7 +74,7 @@
+ 	if 'cuda' in device:
+ 		torch.set_default_tensor_type(torch.cuda.FloatTensor)
+ 
+-def batch_to_device(batch, device='cuda:0'):
++def batch_to_device(batch, device=DEVICE):
+     vals = [
+         to_device(getattr(batch, field), device)
+         for field in batch._fields
+--- a/diffuser/utils/serialization.py
++++ b/diffuser/utils/serialization.py
+@@ -72,7 +72,9 @@
+ 
+     losses = load_losses(*loadpath, 'losses.pkl')
+ 
+-    return DiffusionExperiment(dataset, trainer.model.model, trainer.model, trainer, epoch, losses)
++    # DPCC_USE_EMA=1 evaluates the exponential-moving-average weights, as the original Diffuser does
++    diffusion = trainer.ema_model if os.environ.get('DPCC_USE_EMA', '0') == '1' else trainer.model
++    return DiffusionExperiment(dataset, diffusion.model, diffusion, trainer, epoch, losses)
+ 
+ def check_compatibility(experiment_1, experiment_2):
+     '''
+--- a/diffuser/utils/training.py
++++ b/diffuser/utils/training.py
+@@ -252,7 +252,7 @@
+             loads model and ema from disk
+         '''
+         loadpath = os.path.join(self.logdir, f'state_{epoch}.pt')
+-        data = torch.load(loadpath)
++        data = torch.load(loadpath, map_location=("cuda" if torch.cuda.is_available() else "cpu"))
+ 
+         self.step = data['step']
+         self.model.load_state_dict(data['model'])
+--- a/scripts/eval.py
++++ b/scripts/eval.py
+@@ -8,11 +8,11 @@
+ import matplotlib
+ import matplotlib.pyplot as plt
+ import diffuser.utils as utils
+-from diffuser.sampling import Policy, Projector
++from diffuser.sampling import Policy, Projector, TiltSampler
+ from d3il.environments.d3il.envs.gym_avoiding_env.gym_avoiding.envs.avoiding import ObstacleAvoidanceEnv
+ 
+ # Load configuration
+-with open('config/projection_eval.yaml', 'r') as file:
++with open(os.environ.get('DPCC_EVAL_CONFIG', 'config/projection_eval.yaml'), 'r') as file:
+     config = yaml.safe_load(file)
+ 
+ # General
+@@ -54,6 +54,7 @@
+ 
+         for seed in seeds:
+             args = Parser().parse_args(experiment='plan', seed=seed)
++            if 'plan_batch_size' in config: args.batch_size = int(config['plan_batch_size'])      # B (candidates per control step)
+ 
+             # Get model
+             diffusion_experiment = utils.load_diffusion(args.loadbase, args.dataset, args.diffusion_loadpath, str(args.seed), epoch=args.diffusion_epoch, device=args.device)
+@@ -64,6 +65,9 @@
+                 minari_dataset = minari.load_dataset(exp, download=True)
+                 env = minari_dataset.recover_environment(eval_env=True) if 'pointmaze' in exp else minari_dataset.recover_environment()    # Set render_mode='human' to visualize the environment
+             elif 'avoiding' in exp:
++                if os.environ.get('DPCC_START_X'):      # (ablation) move the rod's start x, e.g. 0.475 = default 0.525 mirrored about x = 0.5
++                    from d3il.environments.d3il.envs.gym_avoiding_env.gym_avoiding.envs.objects import avoiding_objects as _ao
++                    _ao.init_end_eff_pos[0] = float(os.environ['DPCC_START_X'])
+                 env = ObstacleAvoidanceEnv()
+                 env.start()
+ 
+@@ -121,7 +125,7 @@
+ 
+             # -------------------- Run experiments ------------------
+             env_seeds = config['env_seeds'][exp] if 'pointmaze-umaze' in exp else np.arange(100)       
+-            fig_all, ax_all = plt.subplots(min(n_trials, plot_how_many), len(projection_variants), figsize=(10 * len(projection_variants), 10 * min(n_trials, plot_how_many)))
++            fig_all, ax_all = plt.subplots(min(n_trials, plot_how_many), len(projection_variants), figsize=(10 * len(projection_variants), 10 * min(n_trials, plot_how_many)), squeeze=False)
+ 
+             for variant_idx, variant in enumerate(projection_variants):
+                 print(f'------------------------Running {exp} - {halfspace_variant} - {variant} ({seed})----------------------------')
+@@ -148,20 +152,38 @@
+                     delta_t = 4.0 * dt
+ 
+                 # Create projector
+-                projector = Projector(horizon=args.horizon, transition_dim=trajectory_dim, action_dim=action_dim, goal_dim=diffusion.goal_dim, constraint_list=constraints, normalizer=dataset.normalizer, 
+-                                        gradient=gradient, gradient_weights=[1, 0.5, 2], variant=diffuser_variant, dt=delta_t, cost_dims=None, device=args.device, solver='scipy')
++                # Post-processing baseline: project only once, after the final denoising step
++                diffusion_timestep_threshold = 0 if 'post_processing' in variant else config['diffusion_timestep_threshold']
++
++                projector = Projector(horizon=args.horizon, transition_dim=trajectory_dim, action_dim=action_dim, goal_dim=diffusion.goal_dim, constraint_list=constraints, normalizer=dataset.normalizer,
++                                        gradient=gradient, gradient_weights=[1, 0.5, 2], variant=diffuser_variant, dt=delta_t, cost_dims=None, device=args.device, solver='scipy',
++                                        diffusion_timestep_threshold=diffusion_timestep_threshold)
+                 projector = None if variant == 'diffuser' else projector
+ 
+                 trajectory_selection = 'random'
+                 if 'dpcc-t' in variant: trajectory_selection = 'temporal_consistency'
+                 if 'dpcc-c' in variant: trajectory_selection = 'minimum_projection_cost'
+ 
++                # Noise-space tilt sampler (variants starting with 'tilt'; suffixes '-nowarm', '-fixedbeta', '-nofallback' are ablations)
++                tilt = None
++                tilt_history = []
++                fb_split = np.zeros(4)      # [tilt steps, violations after tilt steps, fallback steps, violations after fallback steps]
++                if variant.startswith('tilt'):
++                    tilt_kwargs = dict(config.get('tilt', {}))
++                    if 'nowarm' in variant: tilt_kwargs['warm_start'] = False
++                    if 'fixedbeta' in variant: tilt_kwargs['adapt_beta'] = False
++                    if 'heur' in variant: tilt_kwargs.update(target_accept=0.574, tau_mode='median')        # literature heuristics
++                    if 'nofallback' in variant: tilt_kwargs['fallback'] = 'best'
++                    if 'prevfb' in variant: tilt_kwargs['fallback'] = 'prev'
++                    if 'projfb' in variant: tilt_kwargs['fallback'] = 'project'
++                    tilt = TiltSampler(diffusion, projector, goal_dim=diffusion.goal_dim, **tilt_kwargs)
++
+                 # Create policy
+                 policy = Policy(model=diffusion, normalizer=dataset.normalizer, preprocess_fns=args.preprocess_fns, 
+-                                test_ret=args.test_ret, projector=projector, trajectory_selection=trajectory_selection)    
++                                test_ret=args.test_ret, projector=projector, trajectory_selection=trajectory_selection, tilt=tilt)    
+ 
+                 # Run policy
+-                fig, ax = plt.subplots(min(n_trials, plot_how_many), 6, figsize=(30, 5 * min(n_trials, plot_how_many)))
++                fig, ax = plt.subplots(min(n_trials, plot_how_many), 6, figsize=(30, 5 * min(n_trials, plot_how_many)), squeeze=False)
+                 fig.suptitle(f'{exp} - {variant}')
+ 
+                 save_samples_every = args.horizon // 2
+@@ -175,6 +197,7 @@
+                 total_violations = np.zeros(n_trials)
+                 avg_time = np.zeros(n_trials)
+                 collision_free_completed = np.ones(n_trials)
++                paths_out = []      # per-attempt x/y paths (only saved when DPCC_SAVE_PATHS=1)
+                 pos_tracking_errors = np.zeros((n_trials, args.max_episode_length - 1))
+                 for i in range(n_trials):
+                     torch.manual_seed(i)
+@@ -200,6 +223,11 @@
+ 
+                     sampled_trajectories = []
+                     disable_projection = False
++                    viol_pt = None      # first position at which a (non-tightened) rule was violated
++                    prev_fb = None      # tilt: was the last applied action from the fallback?
++                    if tilt is not None:
++                        if len(tilt.stats['beta']) > 0: tilt_history.append({k: list(v) for k, v in tilt.stats.items()})      # policy.reset() clears the stats, so keep each trial's
++                        policy.reset()
+                     for _ in range(args.max_episode_length):
+                         # Check if a safety constraint is violated
+                         violated_this_timestep = 0
+@@ -224,12 +252,17 @@
+                             act_obs = np.concatenate((action, obs)) if action_dim > 0 else obs
+                             total_violations[i] += np.sum(np.maximum(0, act_obs - upper_bound)) + np.sum(np.maximum(0, lower_bound - act_obs))
+ 
++                        if violated_this_timestep and viol_pt is None and 'avoiding' in exp:
++                            viol_pt = np.array(obs[[obs_indices['x'], obs_indices['y']]])
+                         n_violations[i] += violated_this_timestep
++                        if prev_fb is not None:     # attribute this step's violation to the plan (tilt or fallback) that produced it
++                            fb_split[2 * int(prev_fb)] += 1; fb_split[2 * int(prev_fb) + 1] += violated_this_timestep
+                         
+                         # Calculate action
+                         start = time.time()
+                         action, samples = policy(conditions={0: obs}, batch_size=args.batch_size, horizon=args.horizon, disable_projection=disable_projection)
+                         avg_time[i] += time.time() - start
++                        if tilt is not None: prev_fb = bool(policy.last_tilt_info['fallback'])
+ 
+                         # Step environment
+                         if 'avoiding' in exp:
+@@ -268,6 +301,10 @@
+                             break
+ 
+                     sampled_trajectories_all.append(sampled_trajectories)
++                    if 'avoiding' in exp:
++                        xy = np.array(obs_buffer)[:, [obs_indices['x'], obs_indices['y']]]
++                        paths_out.append({'xy': xy, 'success': bool(n_success[i]), 'success_and_constraints': bool(n_success_and_constraints[i]),
++                                          'crashed': bool(terminated and not success), 'end_xy': xy[-1], 'first_violation_xy': viol_pt})
+                     if i >= plot_how_many:     # Plot only the first n trials
+                         continue
+                     # plot_states = ['x', 'y', 'vx', 'vy'] if 'maze' in exp else ['x', 'y']
+@@ -316,10 +353,31 @@
+                 print(f'Avg number of constraint violations: {np.mean(n_violations):.2f} +- {np.std(n_violations):.2f}')
+                 print(f'Avg total violation: {np.mean(total_violations):.3f} +- {np.std(total_violations):.3f}')
+                 print(f'Average computation time per step: {np.mean(avg_time):.3f}')
++                if tilt is not None:
++                    tilt_history.append({k: list(v) for k, v in tilt.stats.items()})
++                    cat = {k: np.concatenate([h[k] for h in tilt_history]) for k in tilt.stats}       # statistics over all trials
++                    print(f'Tilt: mean failing fraction {cat["fail_frac"].mean():.3f}, fallback rate {cat["fallback"].mean():.3f}, mean beta {cat["beta"].mean():.2f}, MALA acceptance {cat["acc"].mean():.2f}, final step size {cat["h"][-1]:.3f}, final tau {cat["tau"][-1]:.2e}, prev-plan fallback rate {cat["fallback_prev"].mean():.3f}, fallback plan verified {np.nanmean(cat["fallback_ok"]) if np.any(cat["fallback"] > 0) else float("nan"):.3f}, DPCC fallback rate {cat["fallback_dpcc"].mean():.3f}, mean extra MALA steps {cat["extra_steps"].mean():.2f}, rescued by extra steps {cat["rescued"].mean():.3f}')
++                    print(f'Tilt split: tilt steps {int(fb_split[0])} (violation rate {fb_split[1] / max(fb_split[0], 1):.4f}), fallback steps {int(fb_split[2])} (violation rate {fb_split[3] / max(fb_split[2], 1):.4f})')
++                    os.makedirs(f'{args.savepath}/results/halfspace_{halfspace_variant}', exist_ok=True)
++                    import json
++                    hparams = {k: v for k, v in vars(tilt).items() if isinstance(v, (int, float, str, bool, type(None)))}     # all fixed settings (initial values, plus final h_cur/tau_cur/beta)
++                    pj = tilt.projector; dbg = {}
++                    _np = lambda t: t.detach().cpu().numpy() if hasattr(t, 'detach') else np.asarray(t)
++                    if os.environ.get('DPCC_DEBUG_VIOL', '0') == '1':      # (logging) constraint matrices + normalizer limits, to convert residuals to metres
++                        dbg = dict(dbg_C=_np(pj.C), dbg_d=_np(pj.d),
++                                   dbg_P=np.array([_np(P) for P in pj.obstacle_constraints.P_list]),
++                                   dbg_q=np.array([_np(q) for q in pj.obstacle_constraints.q_list]),
++                                   dbg_v=np.array([float(v) for v in pj.obstacle_constraints.v_list]))
++                        if pj.normalizer is not None: dbg.update(dbg_mins=_np(pj.normalizer.mins), dbg_maxs=_np(pj.normalizer.maxs))
++                    np.savez(f'{args.savepath}/results/halfspace_{halfspace_variant}/{variant}_tilt_stats.npz', hparams_json=np.array(json.dumps(hparams)), **dbg,
++                             **{f'{k}_trial{i}': np.array(h[k]) for i, h in enumerate(tilt_history) for k in h})
+                 if variant == 'diffuser': print(f'Tracking error: {np.max(pos_tracking_errors):.3f}')
+ 
+                 save_path = f'{args.savepath}/results/halfspace_{halfspace_variant}' if 'avoiding' in exp else f'{args.savepath}/results'
+                 os.makedirs(save_path, exist_ok=True)
++                if os.environ.get('DPCC_SAVE_PATHS', '0') == '1' and len(paths_out) > 0:
++                    import pickle
++                    with open(f'{save_path}/{variant}_paths.pkl', 'wb') as f: pickle.dump(paths_out, f)
+                 if config['write_to_file']:
+                     np.savez(f'{save_path}/{variant}.npz', 
+                             n_success=n_success, 
+--- a/scripts/load_results.py
++++ b/scripts/load_results.py
+@@ -1,10 +1,11 @@
++import os
+ import yaml
+ import numpy as np
+ import matplotlib.pyplot as plt
+ import diffuser.utils as utils
+ 
+ # Load configuration
+-with open('config/projection_eval.yaml', 'r') as file:
++with open(os.environ.get('DPCC_EVAL_CONFIG', 'config/projection_eval.yaml'), 'r') as file:
+     config = yaml.safe_load(file)
+ 
+ projection_variants = config['projection_variants']
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -3,7 +3,8 @@
+ 
+ exp = 'avoiding-d3il'
+ 
+-seeds = [5, 6, 7, 8, 9]
++import os
++seeds = [int(s) for s in os.environ.get('DPCC_SEEDS', '0,1,2,3,4').split(',')]
+ 
+ class Parser(utils.Parser):
+     dataset: str = exp
+@@ -119,6 +120,7 @@
+         train_lr=args.learning_rate,
+         gradient_accumulate_every=args.gradient_accumulate_every,
+         results_folder=args.savepath,
++        train_device=args.device,
+     )
+ 
+     # -----------------------------------------------------------------------------#

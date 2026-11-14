@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs*/
+analysis/stats_*/
+analysis/*.tsv
+analysis/figs/

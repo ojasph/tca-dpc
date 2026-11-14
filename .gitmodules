@@ -1,0 +1,8 @@
+[submodule "dpcc"]
+	path = dpcc
+	url = https://github.com/ralfroemer99/dpcc
+	ignore = dirty
+[submodule "d3il"]
+	path = d3il
+	url = https://github.com/ALRhub/d3il
+	ignore = dirty

@@ -1,0 +1,172 @@
+# TCA-DPC final method (paper Table 1, "Ours"): base.yaml + split verification
+# (feas_tol 1e-5 on safety constraints, bounds_tol 3e-3 on input bounds), 2.5 cm buffer, 5 model seeds x 10 trials.
+# Layout: avoiding_halfspace_variants = top-left-hard | top-right-hard | both-hard.
+action_indices:
+  avoiding:
+    vx: 0
+    vy: 1
+avoiding_halfspace_variants:
+- both-hard
+ax_limits:
+  avoiding-d3il:
+  - - 0.2
+    - 0.8
+  - - -0.3
+    - 0.4
+bounds:
+  avoiding-d3il:
+  - dimensions:
+    - vx
+    - vy
+    type: lower
+    values:
+    - -0.01
+    - 0
+  - dimensions:
+    - vx
+    - vy
+    type: upper
+    values:
+    - 0.01
+    - 0.01
+  - dimensions:
+    - vx
+    - vy
+    type: lower
+    values:
+    - -0.012
+    - 0
+  - dimensions:
+    - vx
+    - vy
+    type: upper
+    values:
+    - 0.012
+    - 0.012
+constraint_types:
+- halfspace
+- obstacles
+- dynamics
+- bounds
+diffusion_timestep_threshold: 0.5
+dt:
+  avoiding: 1
+enlarge_constraints:
+  avoiding: 0.025
+exps:
+- avoiding-d3il
+halfspace_constraints:
+  avoiding-d3il:
+  - - - 0.8
+      - -0.5
+    - - 0.4
+      - 0.5
+    - below
+  - - - 0.2
+      - -0.5
+    - - 0.6
+      - 0.5
+    - below
+  - - - 0.8
+      - -0.3
+    - - 0.575
+      - 0.5
+    - below
+  - - - 0.2
+      - -0.3
+    - - 0.425
+      - 0.5
+    - below
+n_trials: 10
+observation_indices:
+  avoiding:
+    x: 2
+    x_des: 0
+    y: 3
+    y_des: 1
+obstacle_constraints:
+  avoiding-d3il:
+  - center:
+    - 0.4
+    - 0.08
+    dimensions:
+    - x
+    - y
+    radius: 0.06
+    type: sphere_outside
+  - center:
+    - 0.6
+    - 0.08
+    dimensions:
+    - x
+    - y
+    radius: 0.06
+    type: sphere_outside
+  - center:
+    - 0.5
+    - -0.1
+    dimensions:
+    - x
+    - y
+    radius: 0.06
+    type: sphere_outside
+  - center:
+    - 0.4
+    - 0.08
+    dimensions:
+    - x
+    - y
+    radius: 0.08
+    type: sphere_outside
+  - center:
+    - 0.6
+    - 0.08
+    dimensions:
+    - x
+    - y
+    radius: 0.08
+    type: sphere_outside
+  - center:
+    - 0.5
+    - -0.09
+    dimensions:
+    - x
+    - y
+    radius: 0.08
+    type: sphere_outside
+plan_batch_size: 4
+plot_how_many: 1
+projection_cost: pos_vel
+projection_variants:
+- tilt-tightened
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+tilt:
+  beta_init: 10.0
+  beta_max: 10000.0
+  bounds_tol: 0.003
+  delta: 0.25
+  extra_mala: 10
+  fallback: prev
+  fallback_last: best
+  feas_tol: 1.0e-05
+  kappa: 500.0
+  mala: true
+  margin: 0.001
+  n_fresh: 1
+  n_langevin: 5
+  penalty: S
+  prev_max: 3
+  rho: smooth_hinge
+  rho_eps: 0.001
+  selection: consistency
+  step_size: 0.05
+  target_accept: null
+  tau: 0.01
+  tau_mode: fixed
+  warm_start: true
+write_to_file: false
