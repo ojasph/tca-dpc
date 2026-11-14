@@ -13,7 +13,7 @@
 D=${SWEEP_DIR:?set SWEEP_DIR}; MODELS=${MODELS:-../models}
 J=$(sed -n "${SLURM_ARRAY_TASK_ID}p" $D/jobs.txt)
 LB=logs_sweep/$(basename $D)/$J
-mkdir -p $LB/avoiding-d3il && ln -sfn "$(realpath $MODELS)/avoiding-d3il/diffusion" $LB/avoiding-d3il/diffusion
+mkdir -p $LB/avoiding-d3il/diffusion && ln -sfn "$(realpath $MODELS)" $LB/avoiding-d3il/diffusion/H8_K20_Dmodels.GaussianDiffusion
 export PYTHONPATH=$PWD MUJOCO_GL=egl MPLBACKEND=Agg OMP_NUM_THREADS=4 DPCC_LOGBASE=$LB DPCC_EVAL_CONFIG=$D/$J.yaml
 echo "job=$J $(date)"
 python -u scripts/eval.py

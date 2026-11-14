@@ -25,12 +25,12 @@ cd dpcc && pip install -r requirements.txt
 Download the Avoiding dataset into `d3il/environments/dataset/data/avoiding/` following [D3IL](https://github.com/ALRhub/d3il).
 
 ## Run
-From `dpcc/`, with the pretrained models in `models/` (5 seeds):
+From `dpcc/`, with the pretrained models in `models/` (one folder per seed, 0-4):
 ```bash
 bash scripts/tca_dpc/run_eval.sh config/tca_dpc/tca_dpc.yaml
 ```
 `projection_variants` in the config selects the method: `tilt-tightened` (TCA-DPC), `dpcc-c-tightened`, `dpcc-t-tightened`, `diffuser`.
-To retrain the models: `bash scripts/tca_dpc/train_models.sh`.
+To retrain the models: `bash scripts/tca_dpc/train_models.sh`, then pass `logs/avoiding-d3il/diffusion/H8_K20_Dmodels.GaussianDiffusion` as the second argument of `run_eval.sh`.
 
 ## Reproducing the paper
 `scripts/paper_sweeps/make_sweep_v*.py` write the configs of all experiments (v17: main results; v14–v16, v18: baselines,
